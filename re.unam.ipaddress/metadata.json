@@ -1,0 +1,20 @@
+{
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "manu@unam.re",
+                "Name": "Manuel Mancera"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "A simple widget to see your public IP Address",
+        "Id": "re.unam.ipaddress",
+        "Name": "Simple public IP Address",
+        "Version": "1",
+        "Website": "https://github.com/sinkmanu/Plasma-Widgets/re.unam.ipaddress"
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API": "declarativeappletscript"
+}
+
+
