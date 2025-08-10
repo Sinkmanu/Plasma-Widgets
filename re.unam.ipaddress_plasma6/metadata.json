@@ -1,0 +1,22 @@
+{
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "manu@unam.re",
+                "Name": "Manuel Mancera"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "A simple widget to see your public IP Address in the panel",
+        "Id": "re.unam.ipaddress",
+        "Name": "Simple public IP AddressW",
+        "Version": "1.0",
+        "Website": "https://github.com/Sinkmanu/Plasma-Widgets/tree/main/re.unam.ipaddress_plasma6"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-MainScript": "ui/main.qml",
+    "X-KDE-ConfigModule" : "config/config.qml",
+    "KPackageStructure": "Plasma/Applet"
+}
+
+
