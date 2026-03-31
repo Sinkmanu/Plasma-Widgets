@@ -1,0 +1,20 @@
+{
+    "KPlugin": {
+        "Id": "re.unam.caldavtasks",
+        "Name": "Plasma CalDAV Tasks",
+        "Description": "Display and manage VTODO tasks from any CalDAV-compatible server",
+        "Icon": "view-task",
+        "Authors": [
+            {
+                "Name": "Manuel Mancera",
+                "Email": "manu@unam.re"
+            }
+        ],
+        "Category": "Utilities",
+        "License": "GPL-3.0",
+        "Version": "1.0.0",
+        "Website": "https://github.com/Sinkmanu/Plasma-Widgets/tree/main/re.unam.caldavtasks"
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
