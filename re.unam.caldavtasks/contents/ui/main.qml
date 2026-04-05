@@ -23,6 +23,7 @@ PlasmoidItem {
     property int pendingCount: 0
     property string createCalendarUrl: ""  // URL of first active calendar, used for new tasks
     property bool savingTask: false
+    property var editingTask: null
 
     switchWidth: Kirigami.Units.gridUnit * 12
     switchHeight: Kirigami.Units.gridUnit * 16
@@ -516,6 +517,112 @@ PlasmoidItem {
         xhr.send(ical);
     }
 
+    // Update an existing VTODO on the server via PUT
+    function updateTask(task, newSummary, newDescription, newDue, newPriority) {
+        newSummary = newSummary.trim();
+        if (!newSummary) return;
+
+        var taskUrl;
+        if (task.href.indexOf("http") === 0) {
+            taskUrl = task.href;
+        } else {
+            var baseUrl = caldavUrl.replace(/\/$/, "");
+            var urlParts = baseUrl.match(/^(https?:\/\/[^\/]+)/i);
+            taskUrl = urlParts ? urlParts[1] + task.href : baseUrl + task.href;
+        }
+
+        var unfolded = task.ical.replace(/\r?\n[ \t]/g, "");
+
+        // Update SUMMARY
+        if (/^SUMMARY:/mi.test(unfolded)) {
+            unfolded = unfolded.replace(/^SUMMARY:.*$/mi, "SUMMARY:" + newSummary);
+        } else {
+            unfolded = unfolded.replace(/^(END:VTODO)/mi, "SUMMARY:" + newSummary + "\n$1");
+        }
+
+        // Update DESCRIPTION
+        var newDesc = newDescription.trim();
+        if (newDesc) {
+            var descVal = newDesc.replace(/\n/g, "\\n");
+            if (/^DESCRIPTION:/mi.test(unfolded)) {
+                unfolded = unfolded.replace(/^DESCRIPTION:.*$/mi, "DESCRIPTION:" + descVal);
+            } else {
+                unfolded = unfolded.replace(/^(END:VTODO)/mi, "DESCRIPTION:" + descVal + "\n$1");
+            }
+        } else {
+            unfolded = unfolded.replace(/^DESCRIPTION:.*$\r?\n?/mi, "");
+        }
+
+        // Update DUE
+        var newDueTrimmed = newDue.trim();
+        if (newDueTrimmed) {
+            var dueVal = newDueTrimmed.replace(/-/g, "");
+            if (/^DUE[^:]*:/mi.test(unfolded)) {
+                unfolded = unfolded.replace(/^DUE[^:]*:.*$/mi, "DUE;VALUE=DATE:" + dueVal);
+            } else {
+                unfolded = unfolded.replace(/^(END:VTODO)/mi, "DUE;VALUE=DATE:" + dueVal + "\n$1");
+            }
+        } else {
+            unfolded = unfolded.replace(/^DUE[^:]*:.*$\r?\n?/mi, "");
+        }
+
+        // Update PRIORITY
+        if (newPriority > 0) {
+            if (/^PRIORITY:/mi.test(unfolded)) {
+                unfolded = unfolded.replace(/^PRIORITY:.*$/mi, "PRIORITY:" + newPriority);
+            } else {
+                unfolded = unfolded.replace(/^(END:VTODO)/mi, "PRIORITY:" + newPriority + "\n$1");
+            }
+        } else {
+            unfolded = unfolded.replace(/^PRIORITY:.*$\r?\n?/mi, "");
+        }
+
+        // Update DTSTAMP and LAST-MODIFIED
+        var modTs = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+        if (/^DTSTAMP:/mi.test(unfolded)) {
+            unfolded = unfolded.replace(/^DTSTAMP:.*$/mi, "DTSTAMP:" + modTs);
+        } else {
+            unfolded = unfolded.replace(/^(END:VTODO)/mi, "DTSTAMP:" + modTs + "\n$1");
+        }
+        if (/^LAST-MODIFIED:/mi.test(unfolded)) {
+            unfolded = unfolded.replace(/^LAST-MODIFIED:.*$/mi, "LAST-MODIFIED:" + modTs);
+        } else {
+            unfolded = unfolded.replace(/^(END:VTODO)/mi, "LAST-MODIFIED:" + modTs + "\n$1");
+        }
+
+        console.log("[CalDAVTasks] updateTask: '" + task.summary + "' -> '" + newSummary + "' url=" + taskUrl);
+
+        savingTask = true;
+        var xhr = new XMLHttpRequest();
+        xhr.open("PUT", taskUrl, true);
+        xhr.setRequestHeader("Authorization", authHeader());
+        xhr.setRequestHeader("Content-Type", "text/calendar; charset=utf-8");
+        xhr.setRequestHeader("If-Match", "*");
+        xhr.timeout = 15000;
+
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return;
+            savingTask = false;
+            root.editingTask = null;
+            console.log("[CalDAVTasks] updateTask PUT status: " + xhr.status);
+            if (xhr.status >= 200 && xhr.status < 300) {
+                discoverCalendars();
+            } else {
+                errorMessage = i18n("Failed to update task: %1 %2", xhr.status, xhr.statusText);
+            }
+        };
+        xhr.ontimeout = function() {
+            savingTask = false;
+            errorMessage = i18n("Timed out while updating task.");
+        };
+        xhr.onerror = function() {
+            savingTask = false;
+            errorMessage = i18n("Network error while updating task.");
+        };
+
+        xhr.send(unfolded);
+    }
+
     // Format due date for display
     function formatDue(due) {
         if (!due) return "";
@@ -720,7 +827,7 @@ PlasmoidItem {
         QQC2.ScrollView {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            visible: taskList.length > 0 && !loading
+            visible: taskList.length > 0 && !loading && editingTask === null
 
             ListView {
                 id: taskListView
@@ -809,6 +916,26 @@ PlasmoidItem {
                                 }
                             }
                         }
+
+                        QQC2.ToolButton {
+                            icon.name: "document-edit"
+                            flat: true
+                            opacity: taskMouseArea.containsMouse ? 1.0 : 0.0
+                            Behavior on opacity { NumberAnimation { duration: 100 } }
+                            onClicked: {
+                                var t = task;
+                                root.editingTask = t;
+                                editSummaryField.text = t.summary;
+                                editDescField.text = t.description.replace(/\\n/g, "\n");
+                                editDueField.text = t.due.length >= 8
+                                    ? t.due.substring(0, 4) + "-" + t.due.substring(4, 6) + "-" + t.due.substring(6, 8)
+                                    : "";
+                                editPriorityCombo.currentIndex = (t.priority >= 1 && t.priority <= 4) ? 2
+                                    : t.priority === 5 ? 1 : 0;
+                            }
+                            QQC2.ToolTip.text: i18n("Edit task")
+                            QQC2.ToolTip.visible: hovered
+                        }
                     }
 
                     // Hover highlight
@@ -838,6 +965,90 @@ PlasmoidItem {
             }
         }
 
+        // Edit task form
+        ColumnLayout {
+            visible: editingTask !== null
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            spacing: Kirigami.Units.smallSpacing
+
+            Kirigami.Heading {
+                level: 4
+                text: i18n("Edit Task")
+                Layout.fillWidth: true
+            }
+
+            QQC2.Label { text: i18n("Title") }
+            QQC2.TextField {
+                id: editSummaryField
+                Layout.fillWidth: true
+                Keys.onReturnPressed: {
+                    var p = editPriorityCombo.currentIndex === 2 ? 1
+                           : editPriorityCombo.currentIndex === 1 ? 5 : 0;
+                    updateTask(editingTask, text, editDescField.text, editDueField.text, p);
+                }
+            }
+
+            QQC2.Label { text: i18n("Description") }
+            QQC2.TextArea {
+                id: editDescField
+                Layout.fillWidth: true
+                implicitHeight: Kirigami.Units.gridUnit * 4
+                wrapMode: TextEdit.Wrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.largeSpacing
+
+                ColumnLayout {
+                    spacing: 2
+                    QQC2.Label { text: i18n("Due date") }
+                    QQC2.TextField {
+                        id: editDueField
+                        placeholderText: "YYYY-MM-DD"
+                        implicitWidth: Kirigami.Units.gridUnit * 8
+                    }
+                }
+
+                ColumnLayout {
+                    spacing: 2
+                    QQC2.Label { text: i18n("Priority") }
+                    QQC2.ComboBox {
+                        id: editPriorityCombo
+                        model: [i18n("None"), i18n("Medium"), i18n("High")]
+                    }
+                }
+            }
+
+            Item { Layout.fillHeight: true }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+
+                QQC2.Button {
+                    text: i18n("Cancel")
+                    onClicked: root.editingTask = null
+                }
+
+                Item { Layout.fillWidth: true }
+
+                QQC2.Button {
+                    text: i18n("Save")
+                    highlighted: true
+                    enabled: editSummaryField.text.trim() !== "" && !savingTask
+                    onClicked: {
+                        var p = editPriorityCombo.currentIndex === 2 ? 1
+                               : editPriorityCombo.currentIndex === 1 ? 5 : 0;
+                        updateTask(editingTask, editSummaryField.text,
+                                   editDescField.text, editDueField.text, p);
+                    }
+                }
+            }
+        }
+
         // Add task bar
         Kirigami.Separator { Layout.fillWidth: true }
 
@@ -848,7 +1059,7 @@ PlasmoidItem {
             Layout.bottomMargin: Kirigami.Units.smallSpacing
             Layout.topMargin: Kirigami.Units.smallSpacing
             spacing: Kirigami.Units.smallSpacing
-            visible: caldavUrl !== "" && createCalendarUrl !== ""
+            visible: caldavUrl !== "" && createCalendarUrl !== "" && editingTask === null
 
             QQC2.TextField {
                 id: newTaskField
