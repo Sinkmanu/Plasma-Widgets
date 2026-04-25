@@ -24,6 +24,22 @@ PlasmoidItem {
     property string createCalendarUrl: ""  // URL of first active calendar, used for new tasks
     property bool savingTask: false
     property var editingTask: null
+    property string filterText: ""
+
+    readonly property var filteredTaskList: {
+        if (filterText.trim() === "") return taskList;
+        var q = filterText.trim().toLowerCase();
+        var result = [];
+        for (var i = 0; i < taskList.length; i++) {
+            var t = taskList[i];
+            if ((t.summary && t.summary.toLowerCase().indexOf(q) >= 0) ||
+                (t.description && t.description.toLowerCase().indexOf(q) >= 0) ||
+                (t.calendar && t.calendar.toLowerCase().indexOf(q) >= 0)) {
+                result.push(t);
+            }
+        }
+        return result;
+    }
 
     switchWidth: Kirigami.Units.gridUnit * 12
     switchHeight: Kirigami.Units.gridUnit * 16
@@ -711,9 +727,21 @@ PlasmoidItem {
     // ── Full representation (expanded popup) ──
     fullRepresentation: ColumnLayout {
         Layout.minimumWidth: Kirigami.Units.gridUnit * 18
-        Layout.minimumHeight: Kirigami.Units.gridUnit * 20
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 22
-        Layout.preferredHeight: Kirigami.Units.gridUnit * 28
+        Layout.minimumHeight: Kirigami.Units.gridUnit * 12
+        Layout.preferredWidth: {
+            // Base width grows slightly with more tasks (longer summaries benefit from more space)
+            var computed = Kirigami.Units.gridUnit * 22 + taskList.length * Kirigami.Units.gridUnit * 0.8;
+            // Clamp: at least 22gu, at most 40gu
+            return Math.max(Kirigami.Units.gridUnit * 22, Math.min(computed, Kirigami.Units.gridUnit * 40));
+        }
+        Layout.preferredHeight: {
+            // Fixed overhead: header + separators + add-bar + footer ≈ 8 gridUnits
+            var overhead = Kirigami.Units.gridUnit * 8;
+            // Each task row is approximately 3 gridUnits tall
+            var computed = overhead + taskList.length * Kirigami.Units.gridUnit * 3;
+            // Clamp: at least 16gu (comfortable empty state), at most 40gu
+            return Math.max(Kirigami.Units.gridUnit * 16, Math.min(computed, Kirigami.Units.gridUnit * 40));
+        }
         spacing: 0
 
         // Header
@@ -827,11 +855,11 @@ PlasmoidItem {
         QQC2.ScrollView {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            visible: taskList.length > 0 && !loading && editingTask === null
+            visible: filteredTaskList.length > 0 && !loading && editingTask === null
 
             ListView {
                 id: taskListView
-                model: taskList.length
+                model: filteredTaskList.length
                 spacing: 1
                 clip: true
 
@@ -841,7 +869,8 @@ PlasmoidItem {
                     height: taskContent.implicitHeight + Kirigami.Units.smallSpacing * 2
                     color: index % 2 === 0 ? "transparent" : Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.03)
 
-                    readonly property var task: taskList[index]
+                    readonly property var task: filteredTaskList[index]
+                    property bool editingTitle: false
 
                     RowLayout {
                         id: taskContent
@@ -852,6 +881,7 @@ PlasmoidItem {
                         QQC2.CheckBox {
                             checked: task.completed
                             onToggled: toggleTaskComplete(task)
+                            Layout.alignment: Qt.AlignTop
                         }
 
                         ColumnLayout {
@@ -877,13 +907,56 @@ PlasmoidItem {
                                     elide: Text.ElideRight
                                     font.strikeout: task.completed
                                     opacity: task.completed ? 0.5 : 1.0
+                                    visible: !taskDelegate.editingTitle
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.IBeamCursor
+                                        onClicked: {
+                                            summaryEdit.text = task.summary;
+                                            taskDelegate.editingTitle = true;
+                                            summaryEdit.forceActiveFocus();
+                                            summaryEdit.selectAll();
+                                        }
+                                    }
+                                }
+
+                                QQC2.Label {
+                                    visible: !taskDelegate.editingTitle && task.calendar !== ""
+                                    text: task.calendar
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    color: Kirigami.Theme.disabledTextColor
+                                    elide: Text.ElideRight
+                                    Layout.maximumWidth: Kirigami.Units.gridUnit * 6
+                                }
+
+                                QQC2.TextField {
+                                    id: summaryEdit
+                                    Layout.fillWidth: true
+                                    visible: taskDelegate.editingTitle
+                                    font.strikeout: task.completed
+
+                                    function commit() {
+                                        var newSummary = text.trim();
+                                        if (newSummary && newSummary !== task.summary) {
+                                            var due = task.due.length >= 8
+                                                ? task.due.substring(0, 4) + "-" + task.due.substring(4, 6) + "-" + task.due.substring(6, 8)
+                                                : "";
+                                            updateTask(task, newSummary, task.description, due, task.priority);
+                                        }
+                                        taskDelegate.editingTitle = false;
+                                    }
+
+                                    Keys.onReturnPressed: commit()
+                                    Keys.onEnterPressed: commit()
+                                    Keys.onEscapePressed: taskDelegate.editingTitle = false
+                                    onActiveFocusChanged: if (!activeFocus && visible) commit()
                                 }
                             }
 
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: Kirigami.Units.largeSpacing
-                                visible: task.due !== "" || task.calendar !== ""
+                                visible: task.due !== ""
 
                                 // Due date
                                 QQC2.Label {
@@ -905,15 +978,7 @@ PlasmoidItem {
                                     }
                                 }
 
-                                // Calendar name
-                                QQC2.Label {
-                                    text: task.calendar
-                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                    color: Kirigami.Theme.disabledTextColor
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                    horizontalAlignment: Text.AlignRight
-                                }
+
                             }
                         }
 
@@ -1073,6 +1138,26 @@ PlasmoidItem {
                 Keys.onEnterPressed: {
                     createTask(text);
                     text = "";
+                }
+            }
+
+            QQC2.TextField {
+                id: filterField
+                implicitWidth: Kirigami.Units.gridUnit * 8
+                placeholderText: i18n("Filter…")
+                onTextChanged: root.filterText = text
+                Keys.onEscapePressed: { text = ""; root.filterText = ""; }
+
+                // Clear button
+                QQC2.ToolButton {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: filterField.text !== ""
+                    icon.name: "edit-clear"
+                    flat: true
+                    implicitWidth: Kirigami.Units.iconSizes.small + Kirigami.Units.smallSpacing
+                    implicitHeight: implicitWidth
+                    onClicked: { filterField.text = ""; root.filterText = ""; }
                 }
             }
 
