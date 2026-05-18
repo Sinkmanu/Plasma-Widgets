@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.1] - 2026-05-18
+
+### Added
+- **Full task editing panel**: hovering over a task reveals a pencil button that opens a dedicated edit form to change the title, description, due date (YYYY-MM-DD), and priority (None / Medium / High).
+- **Widget title inline editing**: clicking the heading in the popup header opens an in-place text field to rename the widget title; saved to configuration on Enter or focus loss.
+- **Task description tooltip**: hovering over a task for 800 ms shows its `DESCRIPTION` field in a tooltip.
+- **Pending task badge on panel icon**: the compact representation now overlays a small badge with the number of incomplete tasks.
+- **Appearance settings**: new "Appearance" section in the Display configuration page with a font-size spinner (0 = system default) and a font-family text field applied to task summaries and priority labels.
+- **Calendar auto-discovery in settings**: "Discover Calendars" button in the Display configuration page performs a live PROPFIND against the server and presents the found VTODO calendars as individual checkboxes, replacing the need to type names manually.
+
+### Fixed
+- `updateTask` now correctly updates `DTSTAMP` and `LAST-MODIFIED` on every PUT, satisfying RFC 5545 requirements.
+- Toggling task completion also updates `DTSTAMP` and `LAST-MODIFIED` fields.
+
 ## [1.2.0] - 2026-04-24
 
 ### Added

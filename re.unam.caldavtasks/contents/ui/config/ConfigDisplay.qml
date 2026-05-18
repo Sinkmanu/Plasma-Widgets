@@ -4,11 +4,13 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import org.kde.plasma.plasmoid 2.0
 
-Kirigami.FormLayout {
+QQC2.ScrollView {
     id: configPage
 
     property alias cfg_showCompleted: showCompletedCheck.checked
     property string cfg_calendarFilter: ""
+    property alias cfg_fontSize: fontSizeSpinBox.value
+    property string cfg_fontFamily: ""
 
     // ── Internal discovery state ──
     property var discoveredCalendars: []
@@ -122,35 +124,38 @@ Kirigami.FormLayout {
 
     // ── UI ──
 
+    contentWidth: availableWidth
+
+    Kirigami.FormLayout {
+    width: configPage.availableWidth
+
     QQC2.CheckBox {
         id: showCompletedCheck
         Kirigami.FormData.label: i18n("Show completed tasks:")
         text: i18n("Include completed tasks in the list")
     }
 
-    Item { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18n("Calendar Filter") }
-
-    RowLayout {
-        Kirigami.FormData.label: i18n(" ")
-        QQC2.Button {
-            text: discovering ? i18n("Discovering…") : i18n("Discover Calendars")
-            icon.name: "view-refresh"
-            enabled: !discovering
-            onClicked: doDiscover()
-        }
+    Item {
+        Kirigami.FormData.label: "<span style='font-size:large'><b>" + i18n("Calendar filter") + "</b></span>"
+        implicitHeight: Kirigami.Units.smallSpacing
     }
 
-    // Error label
+    QQC2.Button {
+        Kirigami.FormData.label: i18n("Calendars:")
+        text: discovering ? i18n("Discovering…") : i18n("Discover Calendars")
+        icon.name: "view-refresh"
+        enabled: !discovering
+        onClicked: doDiscover()
+    }
+
     QQC2.Label {
         visible: discoverError !== ""
         text: discoverError
         color: Kirigami.Theme.negativeTextColor
         wrapMode: Text.WordWrap
         Layout.fillWidth: true
-        Kirigami.FormData.label: i18n(" ")
     }
 
-    // Hint when not yet discovered
     QQC2.Label {
         visible: discoveredCalendars.length === 0 && discoverError === "" && !discovering
         text: i18n("Click 'Discover Calendars' to load your calendars from the server.")
@@ -158,21 +163,18 @@ Kirigami.FormLayout {
         Layout.fillWidth: true
         opacity: 0.7
         font.italic: true
-        Kirigami.FormData.label: i18n(" ")
     }
 
-    // Checkboxes — one per discovered calendar
     Repeater {
         model: discoveredCalendars.length
         QQC2.CheckBox {
-            Kirigami.FormData.label: index === 0 ? i18n("Calendars:") : " "
+            Kirigami.FormData.label: index === 0 ? i18n(" ") : " "
             text: discoveredCalendars[index]
             checked: isEnabled(discoveredCalendars[index])
             onToggled: toggleCalendar(discoveredCalendars[index], checked)
         }
     }
 
-    // Manual override text field (advanced / fallback)
     QQC2.TextField {
         id: calendarFilterField
         Kirigami.FormData.label: i18n("Manual filter:")
@@ -182,12 +184,52 @@ Kirigami.FormLayout {
         onEditingFinished: cfg_calendarFilter = text
     }
 
+    Item {
+        Kirigami.FormData.label: "<span style='font-size:large'><b>" + i18n("Appearance") + "</b></span>"
+        implicitHeight: Kirigami.Units.smallSpacing
+    }
+
+    QQC2.SpinBox {
+        id: fontSizeSpinBox
+        Kirigami.FormData.label: i18n("Font size:")
+        from: 0
+        to: 72
+        textFromValue: function(value, locale) {
+            return value === 0 ? i18n("Default") : value + " px";
+        }
+        valueFromText: function(text, locale) {
+            if (text === i18n("Default") || text === "") return 0;
+            return parseInt(text) || 0;
+        }
+    }
+
     QQC2.Label {
-        text: i18n("Comma-separated VTODO list names. Empty = show all. Updated automatically by the checkboxes above.")
+        text: i18n("0 / Default = use the system font size.")
         wrapMode: Text.WordWrap
         Layout.fillWidth: true
         opacity: 0.6
         font.italic: true
     }
+
+    QQC2.ComboBox {
+        id: fontFamilyCombo
+        Kirigami.FormData.label: i18n("Font family:")
+        Layout.fillWidth: true
+
+        model: [i18n("Default")].concat(Qt.fontFamilies())
+
+        currentIndex: {
+            if (!cfg_fontFamily) return 0;
+            var idx = Qt.fontFamilies().indexOf(cfg_fontFamily);
+            return idx >= 0 ? idx + 1 : 0;
+        }
+
+        onActivated: function(index) {
+            cfg_fontFamily = index === 0 ? "" : Qt.fontFamilies()[index - 1];
+        }
+
+    }
+
+    } // Kirigami.FormLayout
 }
 

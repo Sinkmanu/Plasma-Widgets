@@ -19,6 +19,7 @@ Kirigami.FormLayout {
     }
 
     QQC2.Label {
+        Kirigami.FormData.label: " "
         text: i18n("Base DAV URL only — do not include /calendars/... Use: https://yournextcloud/remote.php/dav")
         wrapMode: Text.WordWrap
         Layout.fillWidth: true
@@ -50,10 +51,11 @@ Kirigami.FormLayout {
     }
 
     QQC2.Label {
+        Kirigami.FormData.label: " "
         text: i18n("Tip: Use an App Password from Nextcloud → Settings → Security for better security.")
         wrapMode: Text.WordWrap
         Layout.fillWidth: true
-        opacity: 0.7
+        opacity: 0.6
         font.italic: true
     }
 }

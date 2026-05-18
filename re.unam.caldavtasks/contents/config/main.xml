@@ -33,5 +33,13 @@
             <label>Widget display title</label>
             <default>CalDAV Tasks</default>
         </entry>
+        <entry name="fontSize" type="Int">
+            <label>Font size in pixels (0 = system default)</label>
+            <default>0</default>
+        </entry>
+        <entry name="fontFamily" type="String">
+            <label>Font family (empty = system default)</label>
+            <default></default>
+        </entry>
     </group>
 </kcfg>

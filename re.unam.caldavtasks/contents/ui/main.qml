@@ -15,6 +15,8 @@ PlasmoidItem {
     readonly property bool showCompleted: Plasmoid.configuration.showCompleted
     readonly property string calendarFilter: Plasmoid.configuration.calendarFilter
     readonly property string widgetTitle: Plasmoid.configuration.widgetTitle
+    readonly property int fontSize: Plasmoid.configuration.fontSize
+    readonly property string fontFamily: Plasmoid.configuration.fontFamily
 
     // ── State ──
     property var taskList: []
@@ -727,21 +729,8 @@ PlasmoidItem {
     // ── Full representation (expanded popup) ──
     fullRepresentation: ColumnLayout {
         Layout.minimumWidth: Kirigami.Units.gridUnit * 18
-        Layout.minimumHeight: Kirigami.Units.gridUnit * 12
-        Layout.preferredWidth: {
-            // Base width grows slightly with more tasks (longer summaries benefit from more space)
-            var computed = Kirigami.Units.gridUnit * 22 + taskList.length * Kirigami.Units.gridUnit * 0.8;
-            // Clamp: at least 22gu, at most 40gu
-            return Math.max(Kirigami.Units.gridUnit * 22, Math.min(computed, Kirigami.Units.gridUnit * 40));
-        }
-        Layout.preferredHeight: {
-            // Fixed overhead: header + separators + add-bar + footer ≈ 8 gridUnits
-            var overhead = Kirigami.Units.gridUnit * 8;
-            // Each task row is approximately 3 gridUnits tall
-            var computed = overhead + taskList.length * Kirigami.Units.gridUnit * 3;
-            // Clamp: at least 16gu (comfortable empty state), at most 40gu
-            return Math.max(Kirigami.Units.gridUnit * 16, Math.min(computed, Kirigami.Units.gridUnit * 40));
-        }
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 24
+        // No fixed preferredHeight: let implicitHeight (sum of children) drive the popup size
         spacing: 0
 
         // Header
@@ -854,7 +843,11 @@ PlasmoidItem {
         // Task list
         QQC2.ScrollView {
             Layout.fillWidth: true
-            Layout.fillHeight: true
+            // Grow with actual rendered content; cap at 30 gu to avoid going off-screen
+            Layout.preferredHeight: Math.min(
+                taskListView.contentHeight > 0 ? taskListView.contentHeight : Kirigami.Units.gridUnit * 3,
+                Kirigami.Units.gridUnit * 30
+            )
             visible: filteredTaskList.length > 0 && !loading && editingTask === null
 
             ListView {
@@ -898,7 +891,8 @@ PlasmoidItem {
                                     text: priorityLabel(task.priority)
                                     color: priorityColor(task.priority)
                                     font.bold: true
-                                    font.pixelSize: Kirigami.Theme.defaultFont.pixelSize
+                                    font.pixelSize: root.fontSize > 0 ? root.fontSize : Kirigami.Theme.defaultFont.pixelSize
+                                    font.family: root.fontFamily !== "" ? root.fontFamily : Kirigami.Theme.defaultFont.family
                                 }
 
                                 QQC2.Label {
@@ -906,6 +900,8 @@ PlasmoidItem {
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight
                                     font.strikeout: task.completed
+                                    font.pixelSize: root.fontSize > 0 ? root.fontSize : Kirigami.Theme.defaultFont.pixelSize
+                                    font.family: root.fontFamily !== "" ? root.fontFamily : Kirigami.Theme.defaultFont.family
                                     opacity: task.completed ? 0.5 : 1.0
                                     visible: !taskDelegate.editingTitle
                                     MouseArea {
