@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.2] - 2026-06-01
+
+### Fixed
+- Tasks are now sorted consistently by due date (earliest first). Tasks without a due date are placed after dated tasks; ties fall back to newest creation timestamp and then title.
+
 ## [1.2.1] - 2026-05-18
 
 ### Added

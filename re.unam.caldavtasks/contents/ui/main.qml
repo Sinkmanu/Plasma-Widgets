@@ -228,6 +228,14 @@ PlasmoidItem {
         return calendars;
     }
 
+    // Normalize iCal-like date values to YYYYMMDD for stable lexical sorting
+    function dateSortKey(value) {
+        if (!value) return "";
+        var compact = (value + "").replace(/[^0-9]/g, "");
+        if (compact.length < 8) return "";
+        return compact.substring(0, 8);
+    }
+
     // Step 1: for each calendar, PROPFIND Depth:1 to list .ics resources
     function fetchAllTasks(calendars, index, accumulated) {
         if (index >= calendars.length) {
@@ -235,10 +243,22 @@ PlasmoidItem {
             accumulated.sort(function(a, b) {
                 // Completed always sink to the bottom
                 if (a.completed !== b.completed) return a.completed ? 1 : -1;
-                // Within each group: newest first (CREATED desc — strings are YYYYMMDD... so lexicographic desc works)
-                var ca = a.created || "";
-                var cb = b.created || "";
-                if (ca !== cb) return cb.localeCompare(ca);
+                // Within each group: tasks with due date first, earliest due date first
+                var da = dateSortKey(a.due);
+                var db = dateSortKey(b.due);
+                if (da !== db) {
+                    if (!da) return 1;
+                    if (!db) return -1;
+                    return da.localeCompare(db);
+                }
+                // Fallback for identical/missing due dates: newest CREATED/DTSTAMP first
+                var ca = dateSortKey(a.created);
+                var cb = dateSortKey(b.created);
+                if (ca !== cb) {
+                    if (!ca) return 1;
+                    if (!cb) return -1;
+                    return cb.localeCompare(ca);
+                }
                 return (a.summary || "").localeCompare(b.summary || "");
             });
 
