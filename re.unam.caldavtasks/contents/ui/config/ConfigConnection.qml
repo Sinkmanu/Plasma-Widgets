@@ -58,4 +58,5 @@ Kirigami.FormLayout {
         opacity: 0.6
         font.italic: true
     }
+
 }

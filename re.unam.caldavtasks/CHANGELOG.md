@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.3.0] - 2026-07-21
+
+### Added
+- **Due date picker with time in task edit panel**: editing a task now opens a small calendar popup to select due date, with optional time (HH:mm). The field can be cleared, and saves either date-only or date-time DUE values.
+
+### Changed
+- **Task fetch pipeline refactor**: removed per-task `.ics` GET requests. Task data is now requested inline via `PROPFIND Depth:1` with `cal:calendar-data`, reducing refresh traffic from `1 + N_calendars + N_tasks` requests to `1 + N_calendars` requests.
+- **Simplified compatibility strategy**: removed the unused REPORT path and legacy mode toggle, since Qt/QML `XMLHttpRequest` in this runtime does not support REPORT.
+
 ## [1.2.2] - 2026-06-01
 
 ### Fixed

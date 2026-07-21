@@ -27,6 +27,10 @@ PlasmoidItem {
     property bool savingTask: false
     property var editingTask: null
     property string filterText: ""
+    property date editDueDate: new Date()
+    property int editDueHour: 9
+    property int editDueMinute: 0
+    property bool editDueHasTime: false
 
     readonly property var filteredTaskList: {
         if (filterText.trim() === "") return taskList;
@@ -236,7 +240,7 @@ PlasmoidItem {
         return compact.substring(0, 8);
     }
 
-    // Step 1: for each calendar, PROPFIND Depth:1 to list .ics resources
+    // Fetch tasks from each calendar using PROPFIND with inline calendar-data.
     function fetchAllTasks(calendars, index, accumulated) {
         if (index >= calendars.length) {
             console.log("[CalDAVTasks] All calendars fetched. Total tasks: " + accumulated.length);
@@ -282,7 +286,7 @@ PlasmoidItem {
             calUrl = urlParts ? urlParts[1] + cal.href : baseUrl + cal.href;
         }
 
-        console.log("[CalDAVTasks] PROPFIND listing: " + calUrl);
+        console.log("[CalDAVTasks] PROPFIND (calendar-data) listing: " + calUrl);
 
         var xhr = new XMLHttpRequest();
         xhr.open("PROPFIND", calUrl, true);
@@ -293,122 +297,104 @@ PlasmoidItem {
 
         var body =
             '<?xml version="1.0" encoding="UTF-8"?>' +
-            '<d:propfind xmlns:d="DAV:">' +
-            '<d:prop><d:getetag/><d:getcontenttype/></d:prop>' +
+            '<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">' +
+            '<d:prop><d:getetag/><c:calendar-data/></d:prop>' +
             '</d:propfind>';
 
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return;
-            console.log("[CalDAVTasks] PROPFIND list status: " + xhr.status + " for '" + cal.name + "'");
+            console.log("[CalDAVTasks] PROPFIND status: " + xhr.status + " for '" + cal.name + "'");
+
             if (xhr.status >= 200 && xhr.status < 300) {
-                var icsHrefs = parseIcsHrefs(xhr.responseText, baseUrl);
-                console.log("[CalDAVTasks] .ics resources in '" + cal.name + "': " + icsHrefs.length);
-                fetchIcsFiles(icsHrefs, 0, cal, accumulated, calendars, index);
+                var count = parseTasksFromMultistatus(xhr.responseText, cal, baseUrl, accumulated);
+                console.log("[CalDAVTasks] Inline tasks in '" + cal.name + "': " + count);
+                fetchAllTasks(calendars, index + 1, accumulated);
             } else {
-                console.log("[CalDAVTasks] PROPFIND list failed " + xhr.status + " for " + calUrl);
+                console.log("[CalDAVTasks] PROPFIND failed " + xhr.status + " for " + calUrl);
                 fetchAllTasks(calendars, index + 1, accumulated);
             }
         };
 
         xhr.ontimeout = function() {
-            console.log("[CalDAVTasks] PROPFIND list timed out: " + calUrl);
+            console.log("[CalDAVTasks] PROPFIND timed out: " + calUrl);
             fetchAllTasks(calendars, index + 1, accumulated);
         };
 
         xhr.onerror = function() {
-            console.log("[CalDAVTasks] PROPFIND list onerror: " + calUrl);
+            console.log("[CalDAVTasks] PROPFIND onerror: " + calUrl);
             fetchAllTasks(calendars, index + 1, accumulated);
         };
 
         xhr.send(body);
     }
 
-    // Extract absolute .ics URLs from a PROPFIND Depth:1 multistatus response
-    function parseIcsHrefs(xml, baseUrl) {
-        var hrefs = [];
+    // Parse inline calendar-data from a DAV multistatus response.
+    function parseTasksFromMultistatus(xml, cal, baseUrl, accumulated) {
+        var count = 0;
         var originMatch = baseUrl.match(/^(https?:\/\/[^\/]+)/i);
         var origin = originMatch ? originMatch[1] : "";
 
         var responses = xml.split(/<[^:>]+:response[\s>]/i);
         for (var i = 1; i < responses.length; i++) {
             var block = responses[i];
+
             var hrefMatch = block.match(/<[^:>]+:href[^>]*>([^<]+)<\/[^:>]+:href>/i);
             if (!hrefMatch) continue;
             var href = hrefMatch[1].trim();
-            if (href.slice(-4).toLowerCase() !== ".ics") continue;
             if (href.indexOf("http") !== 0) href = origin + href;
-            hrefs.push(href);
+
+            var dataMatch = block.match(/<[^:>]+:calendar-data[^>]*>([\s\S]*?)<\/[^:>]+:calendar-data>/i);
+            if (!dataMatch) continue;
+
+            var ical = dataMatch[1]
+                .replace(/<!\[CDATA\[/g, "")
+                .replace(/\]\]>/g, "")
+                .trim();
+
+            if (addTaskFromIcal(ical, href, cal, accumulated)) {
+                count++;
+            }
         }
-        return hrefs;
+
+        return count;
     }
 
-    // Step 2: GET each .ics file and parse the VTODO inside
-    function fetchIcsFiles(hrefs, idx, cal, accumulated, calendars, calIndex) {
-        if (idx >= hrefs.length) {
-            fetchAllTasks(calendars, calIndex + 1, accumulated);
-            return;
+    function addTaskFromIcal(ical, href, cal, accumulated) {
+        if (!/BEGIN:VTODO/i.test(ical)) return false;
+
+        var summary = icalField(ical, "SUMMARY") || i18n("(no title)");
+        var status = icalField(ical, "STATUS") || "";
+        var priority = parseInt(icalField(ical, "PRIORITY") || "0", 10);
+        var due = icalField(ical, "DUE") || "";
+        var uid = icalField(ical, "UID") || "";
+        var percent = parseInt(icalField(ical, "PERCENT-COMPLETE") || "0", 10);
+        var description = icalField(ical, "DESCRIPTION") || "";
+        var categories = icalField(ical, "CATEGORIES") || "";
+        var created = icalField(ical, "CREATED") || icalField(ical, "DTSTAMP") || "";
+        var isCompleted = (status.toUpperCase() === "COMPLETED" || percent === 100);
+
+        console.log("[CalDAVTasks]   task: '" + summary + "' completed=" + isCompleted + " priority=" + priority + " created=" + created);
+
+        if (showCompleted || !isCompleted) {
+            accumulated.push({
+                uid: uid,
+                summary: summary,
+                status: status,
+                priority: priority,
+                due: due,
+                completed: isCompleted,
+                percent: percent,
+                description: description,
+                categories: categories,
+                created: created,
+                calendar: cal.name,
+                href: href,
+                calUrl: cal.href,
+                ical: ical
+            });
         }
 
-        var icsUrl = hrefs[idx];
-        var xhr = new XMLHttpRequest();
-        xhr.open("GET", icsUrl, true);
-        xhr.setRequestHeader("Authorization", authHeader());
-        xhr.timeout = 15000;
-
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState !== XMLHttpRequest.DONE) return;
-            if (xhr.status >= 200 && xhr.status < 300) {
-                var ical = xhr.responseText;
-                if (/BEGIN:VTODO/i.test(ical)) {
-                    var summary = icalField(ical, "SUMMARY") || i18n("(no title)");
-                    var status = icalField(ical, "STATUS") || "";
-                    var priority = parseInt(icalField(ical, "PRIORITY") || "0", 10);
-                    var due = icalField(ical, "DUE") || "";
-                    var uid = icalField(ical, "UID") || "";
-                    var percent = parseInt(icalField(ical, "PERCENT-COMPLETE") || "0", 10);
-                    var description = icalField(ical, "DESCRIPTION") || "";
-                    var categories = icalField(ical, "CATEGORIES") || "";
-                    var created = icalField(ical, "CREATED") || icalField(ical, "DTSTAMP") || "";
-                    var isCompleted = (status.toUpperCase() === "COMPLETED" || percent === 100);
-
-                    console.log("[CalDAVTasks]   task: '" + summary + "' completed=" + isCompleted + " priority=" + priority + " created=" + created);
-
-                    if (showCompleted || !isCompleted) {
-                        accumulated.push({
-                            uid: uid,
-                            summary: summary,
-                            status: status,
-                            priority: priority,
-                            due: due,
-                            completed: isCompleted,
-                            percent: percent,
-                            description: description,
-                            categories: categories,
-                            created: created,
-                            calendar: cal.name,
-                            href: icsUrl,
-                            calUrl: cal.href,
-                            ical: ical
-                        });
-                    }
-                }
-            } else {
-                console.log("[CalDAVTasks] GET failed " + xhr.status + " for " + icsUrl);
-            }
-            fetchIcsFiles(hrefs, idx + 1, cal, accumulated, calendars, calIndex);
-        };
-
-        xhr.ontimeout = function() {
-            console.log("[CalDAVTasks] GET timed out: " + icsUrl);
-            fetchIcsFiles(hrefs, idx + 1, cal, accumulated, calendars, calIndex);
-        };
-
-        xhr.onerror = function() {
-            console.log("[CalDAVTasks] GET onerror: " + icsUrl);
-            fetchIcsFiles(hrefs, idx + 1, cal, accumulated, calendars, calIndex);
-        };
-
-        xhr.send(null);
+        return true;
     }
 
     // Extract a field value from iCal text
@@ -418,6 +404,58 @@ PlasmoidItem {
         var re = new RegExp("^" + fieldName + "(?:;[^:]*)?:(.*)$", "mi");
         var m = unfolded.match(re);
         return m ? m[1].trim() : "";
+    }
+
+    // Convert iCal DUE value to editor text (YYYY-MM-DD or YYYY-MM-DD HH:MM)
+    function dueToEditorValue(due) {
+        if (!due || due.length < 8) return "";
+        var y = due.substring(0, 4);
+        var m = due.substring(4, 6);
+        var d = due.substring(6, 8);
+        var text = y + "-" + m + "-" + d;
+        if (due.indexOf("T") >= 0 && due.length >= 13) {
+            var hh = due.substring(9, 11);
+            var mm = due.substring(11, 13);
+            text += " " + hh + ":" + mm;
+        }
+        return text;
+    }
+
+    // Parse iCal DUE value for date-time picker state
+    function dueToPickerState(due) {
+        var now = new Date();
+        var state = {
+            date: new Date(now.getFullYear(), now.getMonth(), now.getDate()),
+            hour: now.getHours(),
+            minute: now.getMinutes(),
+            hasTime: false
+        };
+        if (!due || due.length < 8) return state;
+
+        var y = parseInt(due.substring(0, 4), 10);
+        var m = parseInt(due.substring(4, 6), 10) - 1;
+        var d = parseInt(due.substring(6, 8), 10);
+        state.date = new Date(y, m, d);
+
+        if (due.indexOf("T") >= 0 && due.length >= 13) {
+            state.hasTime = true;
+            state.hour = parseInt(due.substring(9, 11), 10);
+            state.minute = parseInt(due.substring(11, 13), 10);
+        }
+        return state;
+    }
+
+    // Build iCal DUE line from editor text
+    function buildDueIcalLine(newDue) {
+        var v = newDue.trim();
+        if (!v) return "";
+        var m = v.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?$/);
+        if (!m) return "";
+        var datePart = m[1] + m[2] + m[3];
+        if (m[4] !== undefined && m[5] !== undefined) {
+            return "DUE:" + datePart + "T" + m[4] + m[5] + "00";
+        }
+        return "DUE;VALUE=DATE:" + datePart;
     }
 
     // Toggle task completion via PROPPATCH
@@ -594,11 +632,14 @@ PlasmoidItem {
         // Update DUE
         var newDueTrimmed = newDue.trim();
         if (newDueTrimmed) {
-            var dueVal = newDueTrimmed.replace(/-/g, "");
+            var dueLine = buildDueIcalLine(newDueTrimmed);
+            if (!dueLine) {
+                dueLine = "DUE;VALUE=DATE:" + newDueTrimmed.replace(/-/g, "");
+            }
             if (/^DUE[^:]*:/mi.test(unfolded)) {
-                unfolded = unfolded.replace(/^DUE[^:]*:.*$/mi, "DUE;VALUE=DATE:" + dueVal);
+                unfolded = unfolded.replace(/^DUE[^:]*:.*$/mi, dueLine);
             } else {
-                unfolded = unfolded.replace(/^(END:VTODO)/mi, "DUE;VALUE=DATE:" + dueVal + "\n$1");
+                unfolded = unfolded.replace(/^(END:VTODO)/mi, dueLine + "\n$1");
             }
         } else {
             unfolded = unfolded.replace(/^DUE[^:]*:.*$\r?\n?/mi, "");
@@ -680,7 +721,11 @@ PlasmoidItem {
         if (diffDays < 0) return i18n("overdue %1d", Math.abs(diffDays));
         if (diffDays === 0) return i18n("today");
         if (diffDays === 1) return i18n("tomorrow");
-        return d + "/" + m + "/" + y;
+        var base = d + "/" + m + "/" + y;
+        if (due.indexOf("T") >= 0 && due.length >= 13) {
+            base += " " + due.substring(9, 11) + ":" + due.substring(11, 13);
+        }
+        return base;
     }
 
     // Priority label
@@ -954,9 +999,7 @@ PlasmoidItem {
                                     function commit() {
                                         var newSummary = text.trim();
                                         if (newSummary && newSummary !== task.summary) {
-                                            var due = task.due.length >= 8
-                                                ? task.due.substring(0, 4) + "-" + task.due.substring(4, 6) + "-" + task.due.substring(6, 8)
-                                                : "";
+                                            var due = dueToEditorValue(task.due);
                                             updateTask(task, newSummary, task.description, due, task.priority);
                                         }
                                         taskDelegate.editingTitle = false;
@@ -1008,9 +1051,12 @@ PlasmoidItem {
                                 root.editingTask = t;
                                 editSummaryField.text = t.summary;
                                 editDescField.text = t.description.replace(/\\n/g, "\n");
-                                editDueField.text = t.due.length >= 8
-                                    ? t.due.substring(0, 4) + "-" + t.due.substring(4, 6) + "-" + t.due.substring(6, 8)
-                                    : "";
+                                editDueField.text = dueToEditorValue(t.due);
+                                var dueState = dueToPickerState(t.due);
+                                root.editDueDate = dueState.date;
+                                root.editDueHour = dueState.hour;
+                                root.editDueMinute = dueState.minute;
+                                root.editDueHasTime = dueState.hasTime;
                                 editPriorityCombo.currentIndex = (t.priority >= 1 && t.priority <= 4) ? 2
                                     : t.priority === 5 ? 1 : 0;
                             }
@@ -1086,10 +1132,33 @@ PlasmoidItem {
                 ColumnLayout {
                     spacing: 2
                     QQC2.Label { text: i18n("Due date") }
-                    QQC2.TextField {
-                        id: editDueField
-                        placeholderText: "YYYY-MM-DD"
-                        implicitWidth: Kirigami.Units.gridUnit * 8
+                    RowLayout {
+                        spacing: Kirigami.Units.smallSpacing
+
+                        QQC2.TextField {
+                            id: editDueField
+                            readOnly: true
+                            placeholderText: i18n("Select date and time")
+                            implicitWidth: Kirigami.Units.gridUnit * 12
+                        }
+
+                        QQC2.ToolButton {
+                            icon.name: "office-calendar"
+                            onClicked: duePickerPopup.open()
+                            QQC2.ToolTip.text: i18n("Pick due date")
+                            QQC2.ToolTip.visible: hovered
+                        }
+
+                        QQC2.ToolButton {
+                            icon.name: "edit-clear"
+                            visible: editDueField.text !== ""
+                            onClicked: {
+                                editDueField.text = "";
+                                root.editDueHasTime = false;
+                            }
+                            QQC2.ToolTip.text: i18n("Clear due date")
+                            QQC2.ToolTip.visible: hovered
+                        }
                     }
                 }
 
@@ -1099,6 +1168,225 @@ PlasmoidItem {
                     QQC2.ComboBox {
                         id: editPriorityCombo
                         model: [i18n("None"), i18n("Medium"), i18n("High")]
+                    }
+                }
+            }
+
+            QQC2.Popup {
+                id: duePickerPopup
+                x: Math.max(0, (parent.width - width) / 2)
+                y: Math.max(0, (parent.height - height) / 2)
+                modal: true
+                focus: true
+                closePolicy: QQC2.Popup.CloseOnEscape | QQC2.Popup.CloseOnPressOutside
+                padding: Kirigami.Units.smallSpacing
+
+                property date selectedDate: root.editDueDate
+                property int shownMonth: root.editDueDate.getMonth()
+                property int shownYear: root.editDueDate.getFullYear()
+                property var weekdayHeaders: [i18n("Mon"), i18n("Tue"), i18n("Wed"), i18n("Thu"), i18n("Fri"), i18n("Sat"), i18n("Sun")]
+                property var calendarCells: []
+
+                function sameDate(a, b) {
+                    return a.getFullYear() === b.getFullYear()
+                        && a.getMonth() === b.getMonth()
+                        && a.getDate() === b.getDate();
+                }
+
+                function refreshCalendarCells() {
+                    var first = new Date(shownYear, shownMonth, 1);
+                    var firstWeekDay = (first.getDay() + 6) % 7; // Monday-first grid
+                    var start = new Date(shownYear, shownMonth, 1 - firstWeekDay);
+                    var cells = [];
+                    for (var i = 0; i < 42; i++) {
+                        var d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+                        cells.push({
+                            year: d.getFullYear(),
+                            month: d.getMonth(),
+                            day: d.getDate(),
+                            inMonth: d.getMonth() === shownMonth
+                        });
+                    }
+                    calendarCells = cells;
+                }
+
+                function syncEditorField() {
+                    var y = selectedDate.getFullYear();
+                    var m = ("0" + (selectedDate.getMonth() + 1)).slice(-2);
+                    var d = ("0" + selectedDate.getDate()).slice(-2);
+                    var value = y + "-" + m + "-" + d;
+                    if (root.editDueHasTime) {
+                        var hh = ("0" + root.editDueHour).slice(-2);
+                        var mm = ("0" + root.editDueMinute).slice(-2);
+                        value += " " + hh + ":" + mm;
+                    }
+                    editDueField.text = value;
+                }
+
+                onOpened: {
+                    selectedDate = root.editDueDate;
+                    shownMonth = root.editDueDate.getMonth();
+                    shownYear = root.editDueDate.getFullYear();
+                    refreshCalendarCells();
+                }
+
+                onShownMonthChanged: refreshCalendarCells()
+                onShownYearChanged: refreshCalendarCells()
+
+                contentItem: ColumnLayout {
+                    spacing: Kirigami.Units.smallSpacing
+
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        QQC2.ToolButton {
+                            icon.name: "go-previous"
+                            onClicked: {
+                                duePickerPopup.shownMonth -= 1;
+                                if (duePickerPopup.shownMonth < 0) {
+                                    duePickerPopup.shownMonth = 11;
+                                    duePickerPopup.shownYear -= 1;
+                                }
+                            }
+                        }
+
+                        QQC2.Label {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: Qt.formatDate(new Date(duePickerPopup.shownYear, duePickerPopup.shownMonth, 1), "MMMM yyyy")
+                            font.bold: true
+                        }
+
+                        QQC2.ToolButton {
+                            icon.name: "go-next"
+                            onClicked: {
+                                duePickerPopup.shownMonth += 1;
+                                if (duePickerPopup.shownMonth > 11) {
+                                    duePickerPopup.shownMonth = 0;
+                                    duePickerPopup.shownYear += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    GridLayout {
+                        columns: 7
+                        Layout.fillWidth: true
+                        columnSpacing: Kirigami.Units.smallSpacing
+                        rowSpacing: Kirigami.Units.smallSpacing
+
+                        Repeater {
+                            model: duePickerPopup.weekdayHeaders
+                            delegate: QQC2.Label {
+                                text: modelData
+                                horizontalAlignment: Text.AlignHCenter
+                                Layout.fillWidth: true
+                                opacity: 0.8
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            }
+                        }
+
+                        Repeater {
+                            model: duePickerPopup.calendarCells
+                            delegate: QQC2.ItemDelegate {
+                                readonly property bool isSelected: duePickerPopup.selectedDate
+                                    && duePickerPopup.selectedDate.getFullYear() === modelData.year
+                                    && duePickerPopup.selectedDate.getMonth() === modelData.month
+                                    && duePickerPopup.selectedDate.getDate() === modelData.day
+                                readonly property bool isToday: duePickerPopup.sameDate(new Date(), new Date(modelData.year, modelData.month, modelData.day))
+
+                                implicitWidth: Kirigami.Units.gridUnit * 1.9
+                                implicitHeight: Kirigami.Units.gridUnit * 1.7
+                                opacity: modelData.inMonth ? 1.0 : 0.45
+
+                                onClicked: {
+                                    duePickerPopup.selectedDate = new Date(modelData.year, modelData.month, modelData.day);
+                                    if (!modelData.inMonth) {
+                                        duePickerPopup.shownMonth = modelData.month;
+                                        duePickerPopup.shownYear = modelData.year;
+                                    }
+                                }
+
+                                background: Rectangle {
+                                    radius: Kirigami.Units.smallSpacing
+                                    color: isSelected
+                                        ? Kirigami.Theme.highlightColor
+                                        : (isToday
+                                            ? Qt.rgba(Kirigami.Theme.highlightColor.r, Kirigami.Theme.highlightColor.g, Kirigami.Theme.highlightColor.b, 0.15)
+                                            : "transparent")
+                                    border.width: isToday && !isSelected ? 1 : 0
+                                    border.color: Kirigami.Theme.highlightColor
+                                }
+
+                                contentItem: QQC2.Label {
+                                    text: modelData.day
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                    color: isSelected ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor
+                                }
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        spacing: Kirigami.Units.smallSpacing
+
+                        QQC2.CheckBox {
+                            text: i18n("Include time")
+                            checked: root.editDueHasTime
+                            onToggled: root.editDueHasTime = checked
+                        }
+
+                        QQC2.SpinBox {
+                            enabled: root.editDueHasTime
+                            from: 0
+                            to: 23
+                            value: root.editDueHour
+                            onValueModified: root.editDueHour = value
+                            textFromValue: function(value) { return ("0" + value).slice(-2); }
+                            valueFromText: function(text) { return parseInt(text, 10); }
+                        }
+
+                        QQC2.Label {
+                            text: ":"
+                            enabled: root.editDueHasTime
+                        }
+
+                        QQC2.SpinBox {
+                            enabled: root.editDueHasTime
+                            from: 0
+                            to: 59
+                            value: root.editDueMinute
+                            onValueModified: root.editDueMinute = value
+                            textFromValue: function(value) { return ("0" + value).slice(-2); }
+                            valueFromText: function(text) { return parseInt(text, 10); }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        QQC2.Button {
+                            text: i18n("Today")
+                            onClicked: {
+                                var now = new Date();
+                                duePickerPopup.selectedDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                                duePickerPopup.shownMonth = duePickerPopup.selectedDate.getMonth();
+                                duePickerPopup.shownYear = duePickerPopup.selectedDate.getFullYear();
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        QQC2.Button {
+                            text: i18n("Apply")
+                            highlighted: true
+                            onClicked: {
+                                root.editDueDate = duePickerPopup.selectedDate;
+                                duePickerPopup.syncEditorField();
+                                duePickerPopup.close();
+                            }
+                        }
                     }
                 }
             }
