@@ -27,6 +27,7 @@ PlasmoidItem {
     property bool savingTask: false
     property var editingTask: null
     property string filterText: ""
+    property string addingSubtaskForUid: ""
     property date editDueDate: new Date()
     property int editDueHour: 9
     property int editDueMinute: 0
@@ -240,6 +241,47 @@ PlasmoidItem {
         return compact.substring(0, 8);
     }
 
+    // Reorder an already-sorted flat task list into parent/subtask order using
+    // RELATED-TO (RFC 5545), annotating each task with a "depth" for indentation.
+    // Orphan subtasks (parent missing/filtered out) are treated as top-level.
+    function buildTaskHierarchy(sorted) {
+        var byUid = {};
+        for (var i = 0; i < sorted.length; i++) {
+            if (sorted[i].uid) byUid[sorted[i].uid] = true;
+        }
+
+        var childrenByParent = {};
+        for (var j = 0; j < sorted.length; j++) {
+            var t = sorted[j];
+            if (t.relatedTo && t.relatedTo !== t.uid && byUid[t.relatedTo]) {
+                if (!childrenByParent[t.relatedTo]) childrenByParent[t.relatedTo] = [];
+                childrenByParent[t.relatedTo].push(t);
+            }
+        }
+
+        var result = [];
+        var visited = {};
+        function addWithChildren(task, depth) {
+            if (visited[task.uid]) return;
+            visited[task.uid] = true;
+            task.depth = depth;
+            result.push(task);
+            var kids = childrenByParent[task.uid] || [];
+            for (var k = 0; k < kids.length; k++) addWithChildren(kids[k], depth + 1);
+        }
+
+        for (var m = 0; m < sorted.length; m++) {
+            var candidate = sorted[m];
+            var isTopLevel = !candidate.relatedTo || candidate.relatedTo === candidate.uid || !byUid[candidate.relatedTo];
+            if (isTopLevel) addWithChildren(candidate, 0);
+        }
+        // Safety net: anything not reached (e.g. relation cycles) is appended top-level.
+        for (var n = 0; n < sorted.length; n++) {
+            if (!visited[sorted[n].uid]) addWithChildren(sorted[n], 0);
+        }
+        return result;
+    }
+
     // Fetch tasks from each calendar using PROPFIND with inline calendar-data.
     function fetchAllTasks(calendars, index, accumulated) {
         if (index >= calendars.length) {
@@ -266,7 +308,7 @@ PlasmoidItem {
                 return (a.summary || "").localeCompare(b.summary || "");
             });
 
-            taskList = accumulated;
+            taskList = buildTaskHierarchy(accumulated);
             pendingCount = 0;
             for (var c = 0; c < accumulated.length; c++) {
                 if (!accumulated[c].completed) pendingCount++;
@@ -371,6 +413,7 @@ PlasmoidItem {
         var description = icalField(ical, "DESCRIPTION") || "";
         var categories = icalField(ical, "CATEGORIES") || "";
         var created = icalField(ical, "CREATED") || icalField(ical, "DTSTAMP") || "";
+        var relatedTo = icalField(ical, "RELATED-TO") || "";
         var isCompleted = (status.toUpperCase() === "COMPLETED" || percent === 100);
 
         console.log("[CalDAVTasks]   task: '" + summary + "' completed=" + isCompleted + " priority=" + priority + " created=" + created);
@@ -387,6 +430,8 @@ PlasmoidItem {
                 description: description,
                 categories: categories,
                 created: created,
+                relatedTo: relatedTo,
+                depth: 0,
                 calendar: cal.name,
                 href: href,
                 calUrl: cal.href,
@@ -539,10 +584,26 @@ PlasmoidItem {
         });
     }
 
-    // Create a new VTODO on the server via PUT
-    function createTask(summary) {
+    // Create a new VTODO on the server via PUT.
+    // parentUid: optional UID of the parent task, sets RELATED-TO to create a subtask.
+    // calendarHref: optional calendar href (task.calUrl) to create the subtask in the
+    // same calendar as its parent instead of the default "new task" calendar.
+    function createTask(summary, parentUid, calendarHref) {
         summary = summary.trim();
-        if (!summary || !createCalendarUrl) return;
+        if (!summary) return;
+
+        var targetCalendarUrl = createCalendarUrl;
+        if (calendarHref) {
+            var baseUrl = caldavUrl.replace(/\/$/, "");
+            if (calendarHref.indexOf("http") === 0) {
+                targetCalendarUrl = calendarHref;
+            } else {
+                var originParts = baseUrl.match(/^(https?:\/\/[^\/]+)/i);
+                targetCalendarUrl = originParts ? originParts[1] + calendarHref : baseUrl + calendarHref;
+            }
+            if (targetCalendarUrl.slice(-1) !== "/") targetCalendarUrl += "/";
+        }
+        if (!targetCalendarUrl) return;
 
         var uid = generateUid();
         var now = new Date();
@@ -556,13 +617,14 @@ PlasmoidItem {
             "CREATED:" + stamp + "\r\n" +
             "UID:" + uid + "\r\n" +
             "SUMMARY:" + summary + "\r\n" +
+            (parentUid ? "RELATED-TO;RELTYPE=PARENT:" + parentUid + "\r\n" : "") +
             "STATUS:NEEDS-ACTION\r\n" +
             "PERCENT-COMPLETE:0\r\n" +
             "END:VTODO\r\n" +
             "END:VCALENDAR\r\n";
 
-        var url = createCalendarUrl + uid + ".ics";
-        console.log("[CalDAVTasks] createTask: '" + summary + "' -> " + url);
+        var url = targetCalendarUrl + uid + ".ics";
+        console.log("[CalDAVTasks] createTask: '" + summary + "' -> " + url + (parentUid ? " (subtask of " + parentUid + ")" : ""));
 
         savingTask = true;
         var xhr = new XMLHttpRequest();
@@ -924,7 +986,8 @@ PlasmoidItem {
                 delegate: Rectangle {
                     id: taskDelegate
                     width: taskListView.width
-                    height: taskContent.implicitHeight + Kirigami.Units.smallSpacing * 2
+                    height: Kirigami.Units.smallSpacing * 2 + taskContent.implicitHeight
+                        + (subtaskComposer.visible ? Kirigami.Units.smallSpacing + subtaskComposer.implicitHeight : 0)
                     color: index % 2 === 0 ? "transparent" : Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.03)
 
                     readonly property var task: filteredTaskList[index]
@@ -932,8 +995,12 @@ PlasmoidItem {
 
                     RowLayout {
                         id: taskContent
-                        anchors.fill: parent
-                        anchors.margins: Kirigami.Units.smallSpacing
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.topMargin: Kirigami.Units.smallSpacing
+                        anchors.rightMargin: Kirigami.Units.smallSpacing
+                        anchors.leftMargin: Kirigami.Units.smallSpacing + (task.depth || 0) * Kirigami.Units.gridUnit
                         spacing: Kirigami.Units.smallSpacing
 
                         QQC2.CheckBox {
@@ -949,6 +1016,13 @@ PlasmoidItem {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: Kirigami.Units.smallSpacing
+
+                                // Subtask marker
+                                QQC2.Label {
+                                    visible: (task.depth || 0) > 0
+                                    text: "\u21B3"
+                                    color: Kirigami.Theme.disabledTextColor
+                                }
 
                                 // Priority indicator
                                 QQC2.Label {
@@ -1042,6 +1116,19 @@ PlasmoidItem {
                         }
 
                         QQC2.ToolButton {
+                            icon.name: "list-add"
+                            flat: true
+                            opacity: taskMouseArea.containsMouse ? 1.0 : 0.0
+                            Behavior on opacity { NumberAnimation { duration: 100 } }
+                            onClicked: {
+                                root.addingSubtaskForUid = (root.addingSubtaskForUid === task.uid) ? "" : task.uid;
+                                subtaskField.text = "";
+                            }
+                            QQC2.ToolTip.text: i18n("Add subtask")
+                            QQC2.ToolTip.visible: hovered
+                        }
+
+                        QQC2.ToolButton {
                             icon.name: "document-edit"
                             flat: true
                             opacity: taskMouseArea.containsMouse ? 1.0 : 0.0
@@ -1065,9 +1152,53 @@ PlasmoidItem {
                         }
                     }
 
+                    // Inline subtask composer, revealed via the "add subtask" button above
+                    RowLayout {
+                        id: subtaskComposer
+                        anchors.top: taskContent.bottom
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.topMargin: Kirigami.Units.smallSpacing
+                        anchors.rightMargin: Kirigami.Units.smallSpacing
+                        anchors.leftMargin: Kirigami.Units.smallSpacing + ((task.depth || 0) + 1) * Kirigami.Units.gridUnit
+                        spacing: Kirigami.Units.smallSpacing
+                        visible: root.addingSubtaskForUid === task.uid
+
+                        function commitSubtask() {
+                            if (subtaskField.text.trim() !== "") {
+                                createTask(subtaskField.text, task.uid, task.calUrl);
+                            }
+                            subtaskField.text = "";
+                            root.addingSubtaskForUid = "";
+                        }
+
+                        QQC2.TextField {
+                            id: subtaskField
+                            Layout.fillWidth: true
+                            placeholderText: i18n("New subtask…")
+                            Keys.onReturnPressed: subtaskComposer.commitSubtask()
+                            Keys.onEnterPressed: subtaskComposer.commitSubtask()
+                            Keys.onEscapePressed: { text = ""; root.addingSubtaskForUid = ""; }
+                        }
+
+                        QQC2.ToolButton {
+                            icon.name: "dialog-ok"
+                            enabled: subtaskField.text.trim() !== ""
+                            onClicked: subtaskComposer.commitSubtask()
+                        }
+
+                        QQC2.ToolButton {
+                            icon.name: "dialog-cancel"
+                            onClicked: { subtaskField.text = ""; root.addingSubtaskForUid = ""; }
+                        }
+                    }
+
                     // Hover highlight
                     MouseArea {
-                        anchors.fill: parent
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        height: taskContent.implicitHeight + Kirigami.Units.smallSpacing * 2
                         hoverEnabled: true
                         propagateComposedEvents: true
                         onEntered: taskDelegate.color = Qt.rgba(Kirigami.Theme.highlightColor.r, Kirigami.Theme.highlightColor.g, Kirigami.Theme.highlightColor.b, 0.1)

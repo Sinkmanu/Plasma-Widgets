@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.4.0] - 2026-08-26
+
+### Added
+- **Subtasks**: hovering a task now reveals a "+" button next to the edit pencil to add a subtask inline. Subtasks are linked to their parent via the standard iCalendar `RELATED-TO` property (RFC 5545), are created in the same calendar as their parent, and are displayed indented under it with a small marker. Servers/clients that don't understand `RELATED-TO` (most CalDAV servers just store it) will simply show them as regular flat tasks, so nothing breaks for unsupported setups.
+
 ## [1.3.0] - 2026-07-21
 
 ### Added
