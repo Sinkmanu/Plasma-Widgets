@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.5.0] - 2026-09-22
+
+### Added
+- **Radicale support**: the widget previously assumed Nextcloud's URL layout (`/calendars/<user>/<calendar>/`) and silently broke against servers with a different structure, such as Radicale (`/<user>/<calendar-id>/`), as reported on GitHub. Discovery, task fetching, and task editing now work against both.
+
+### Changed
+- Calendar discovery now follows the CalDAV `current-user-principal` and `calendar-home-set` properties, supporting servers whose calendar collections do not use Nextcloud's `/calendars/<user>/` path, including Radicale. The former Nextcloud path remains as a fallback for legacy server configurations.
+
+### Fixed
+- All DAV response parsing (`current-user-principal`, `calendar-home-set`, calendar listing, and task fetching) now accepts XML with or without a namespace prefix on tags. Radicale emits unprefixed elements (`xmlns="DAV:"` declared once on the root, e.g. `<href>` instead of `<d:href>`), which the previous prefix-only regexes never matched — causing discovery to silently fall back to the Nextcloud-style path and fail with 404 against Radicale.
+- Task fetching now falls back to individual `GET` requests per resource when a plain `PROPFIND` returns resources but no `calendar-data` for any of them. Radicale strictly follows RFC 4791 and answers `calendar-data` requested via plain PROPFIND with 404 on that property (unlike Nextcloud's more lenient PROPFIND handling), so tasks created and stored correctly never showed up in the widget. A `REPORT calendar-query` would be the spec-correct fix, but QML's `XMLHttpRequest` doesn't reliably support the REPORT verb (this was also the original blocker with Nextcloud that led to the PROPFIND-based inline approach in 1.3.0), so the fallback goes back to per-item GET instead — same as the pre-1.3.0 behavior, but only for servers that need it. The single-PROPFIND path is left untouched as the primary attempt for servers that support inline calendar-data.
+- Completing/editing a task now sends the resource's real `ETag` in the `If-Match` header instead of the `*` wildcard. Radicale returns 412 Precondition Failed for `If-Match: *` on an update (Nextcloud accepts it), so toggling completion or editing a task silently failed against Radicale. The ETag was already being requested via `d:getetag` but discarded; it's now captured and stored per task, with no extra requests needed.
+- Sending the real `ETag` above caused a regression against Nextcloud, which then rejected the update with 412 instead. Both `toggleTaskComplete` and `updateTask` now retry the PUT once without `If-Match` if the server responds 412, so a mismatched/stale ETag on any server never permanently blocks an edit.
+
 ## [1.4.0] - 2026-08-26
 
 ### Added

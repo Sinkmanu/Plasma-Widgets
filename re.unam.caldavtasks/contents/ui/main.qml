@@ -65,30 +65,75 @@ PlasmoidItem {
         return "Basic " + Qt.btoa(username + ":" + password);
     }
 
-    // PROPFIND to discover calendars that support VTODO
-    function discoverCalendars() {
-        console.log("[CalDAVTasks] discoverCalendars() — url='" + caldavUrl + "' user='" + username + "' passSet=" + (password !== "") + " filter='" + calendarFilter + "'");
-        if (!caldavUrl || !username || !password) {
-            errorMessage = i18n("Please configure connection settings.");
-            loading = false;
-            console.log("[CalDAVTasks] Aborted: missing config.");
-            return;
-        }
-
-        loading = true;
-        errorMessage = "";
-        taskList = [];
-
-        var baseUrl = caldavUrl.replace(/\/$/, "");
-        // Normalise: if the user pasted a full calendar URL, trim to /calendars/username/
-        var calendarsUrl;
+    function fallbackCalendarCollectionUrl(baseUrl) {
         var calMatch = baseUrl.match(/^(.*\/calendars\/[^\/]+)/i);
-        if (calMatch) {
-            calendarsUrl = calMatch[1] + "/";
-        } else {
-            calendarsUrl = baseUrl + "/calendars/" + encodeURIComponent(username) + "/";
-        }
+        return calMatch
+            ? calMatch[1] + "/"
+            : baseUrl + "/calendars/" + encodeURIComponent(username) + "/";
+    }
 
+    function resolveDavUrl(baseUrl, href) {
+        if (href.indexOf("http") === 0) return href;
+        var originMatch = baseUrl.match(/^(https?:\/\/[^\/]+)/i);
+        var origin = originMatch ? originMatch[1] : "";
+        if (href.charAt(0) === "/") return origin + href;
+        return baseUrl.replace(/\/$/, "") + "/" + href;
+    }
+
+    function responseHref(xml, propertyName) {
+        // Namespace prefix is optional: Radicale emits unprefixed tags (xmlns="DAV:" on the root),
+        // while Nextcloud/Baikal use prefixes like "d:" or "cs:".
+        var propertyMatch = new RegExp("<(?:[^:>\\s]+:)?" + propertyName + "[^>]*>[\\s\\S]*?<(?:[^:>\\s]+:)?href[^>]*>([^<]+)</(?:[^:>\\s]+:)?href>", "i");
+        var match = xml.match(propertyMatch);
+        return match ? match[1].trim() : "";
+    }
+
+    // Resolve the calendar collection through RFC 4791, falling back to Nextcloud's layout.
+    function discoverCalendarCollection(baseUrl, callback) {
+        var fallbackUrl = fallbackCalendarCollectionUrl(baseUrl);
+        var endpointXhr = new XMLHttpRequest();
+        endpointXhr.open("PROPFIND", baseUrl + "/", true);
+        endpointXhr.setRequestHeader("Authorization", authHeader());
+        endpointXhr.setRequestHeader("Content-Type", "application/xml; charset=utf-8");
+        endpointXhr.setRequestHeader("Depth", "0");
+        endpointXhr.timeout = 20000;
+        endpointXhr.onreadystatechange = function() {
+            if (endpointXhr.readyState !== XMLHttpRequest.DONE) return;
+            var principalHref = endpointXhr.status >= 200 && endpointXhr.status < 300
+                ? responseHref(endpointXhr.responseText, "current-user-principal") : "";
+            if (!principalHref) {
+                console.log("[CalDAVTasks] No current-user-principal; using Nextcloud fallback: " + fallbackUrl);
+                callback(fallbackUrl);
+                return;
+            }
+
+            var principalUrl = resolveDavUrl(baseUrl, principalHref);
+            var principalXhr = new XMLHttpRequest();
+            principalXhr.open("PROPFIND", principalUrl, true);
+            principalXhr.setRequestHeader("Authorization", authHeader());
+            principalXhr.setRequestHeader("Content-Type", "application/xml; charset=utf-8");
+            principalXhr.setRequestHeader("Depth", "0");
+            principalXhr.timeout = 20000;
+            principalXhr.onreadystatechange = function() {
+                if (principalXhr.readyState !== XMLHttpRequest.DONE) return;
+                var collectionHref = principalXhr.status >= 200 && principalXhr.status < 300
+                    ? responseHref(principalXhr.responseText, "calendar-home-set") : "";
+                var calendarsUrl = collectionHref ? resolveDavUrl(baseUrl, collectionHref) : fallbackUrl;
+                if (!collectionHref) console.log("[CalDAVTasks] No calendar-home-set; using Nextcloud fallback: " + fallbackUrl);
+                if (calendarsUrl.slice(-1) !== "/") calendarsUrl += "/";
+                callback(calendarsUrl);
+            };
+            principalXhr.onerror = function() { callback(fallbackUrl); };
+            principalXhr.ontimeout = function() { callback(fallbackUrl); };
+            principalXhr.send('<?xml version="1.0" encoding="UTF-8"?><d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-home-set/></d:prop></d:propfind>');
+        };
+        endpointXhr.onerror = function() { callback(fallbackUrl); };
+        endpointXhr.ontimeout = function() { callback(fallbackUrl); };
+        endpointXhr.send('<?xml version="1.0" encoding="UTF-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>');
+    }
+
+    // PROPFIND to discover calendars that support VTODO.
+    function discoverCalendarsAt(calendarsUrl, baseUrl) {
         console.log("[CalDAVTasks] PROPFIND to: " + calendarsUrl);
 
         var xhr = new XMLHttpRequest();
@@ -195,6 +240,25 @@ PlasmoidItem {
         xhr.send(propfindBody);
     }
 
+    function discoverCalendars() {
+        console.log("[CalDAVTasks] discoverCalendars() — url='" + caldavUrl + "' user='" + username + "' passSet=" + (password !== "") + " filter='" + calendarFilter + "'");
+        if (!caldavUrl || !username || !password) {
+            errorMessage = i18n("Please configure connection settings.");
+            loading = false;
+            console.log("[CalDAVTasks] Aborted: missing config.");
+            return;
+        }
+
+        loading = true;
+        errorMessage = "";
+        taskList = [];
+
+        var baseUrl = caldavUrl.replace(/\/$/, "");
+        discoverCalendarCollection(baseUrl, function(calendarsUrl) {
+            discoverCalendarsAt(calendarsUrl, baseUrl);
+        });
+    }
+
     // Parse PROPFIND multistatus to extract calendar hrefs that support VTODO
     function parseCalendarsResponse(xml) {
         var calendars = [];
@@ -202,27 +266,27 @@ PlasmoidItem {
         // Log raw response for debugging (visible in plasmawindowed terminal)
         console.log("[CalDAVTasks] PROPFIND response:\n" + xml);
 
-        // Split on any namespace-prefixed <response> tag (DAV: namespace, any prefix)
-        var responses = xml.split(/<[^:>]+:response[\s>]/i);
+        // Split on <response> tag, with or without a namespace prefix (Radicale omits it)
+        var responses = xml.split(/<(?:[^:>\s]+:)?response[\s>]/i);
 
         for (var i = 1; i < responses.length; i++) {
             var block = responses[i];
 
-            // Extract href (any namespace prefix)
-            var hrefMatch = block.match(/<[^:>]+:href[^>]*>([^<]+)<\/[^:>]+:href>/i);
+            // Extract href (namespace prefix optional)
+            var hrefMatch = block.match(/<(?:[^:>\s]+:)?href[^>]*>([^<]+)<\/(?:[^:>\s]+:)?href>/i);
             if (!hrefMatch) continue;
             var href = hrefMatch[1].trim();
 
-            // Check it's a calendar collection (any namespace prefix)
-            var isCalendar = /:calendar[\s\/]/i.test(block);
+            // Check it's a calendar collection (namespace prefix optional)
+            var isCalendar = /<(?:[^:>\s]+:)?calendar[\s\/>]/i.test(block);
             if (!isCalendar) continue;
 
-            // Check it supports VTODO — any prefix, with or without quotes
-            var supportsVtodo = /:comp[^>]+name\s*=\s*["']?VTODO["']?/i.test(block);
+            // Check it supports VTODO — prefix optional, with or without quotes
+            var supportsVtodo = /comp[^>]+name\s*=\s*["']?VTODO["']?/i.test(block);
             if (!supportsVtodo) continue;
 
-            // Extract display name (any namespace prefix)
-            var nameMatch = block.match(/<[^:>]+:displayname[^>]*>([^<]*)<\/[^:>]+:displayname>/i);
+            // Extract display name (namespace prefix optional)
+            var nameMatch = block.match(/<(?:[^:>\s]+:)?displayname[^>]*>([^<]*)<\/(?:[^:>\s]+:)?displayname>/i);
             var displayName = (nameMatch && nameMatch[1].trim()) ? nameMatch[1].trim() : href;
 
             calendars.push({ href: href, name: displayName });
@@ -350,7 +414,18 @@ PlasmoidItem {
             if (xhr.status >= 200 && xhr.status < 300) {
                 var count = parseTasksFromMultistatus(xhr.responseText, cal, baseUrl, accumulated);
                 console.log("[CalDAVTasks] Inline tasks in '" + cal.name + "': " + count);
-                fetchAllTasks(calendars, index + 1, accumulated);
+                // Some servers (e.g. Radicale) strictly follow RFC 4791 and refuse to
+                // return calendar-data from a plain PROPFIND (404 on that property),
+                // even though resources exist. Fall back to a per-item GET for those.
+                // (A REPORT calendar-query would be the "correct" fix, but QML's
+                // XMLHttpRequest doesn't support the REPORT verb reliably.)
+                var itemHrefs = extractItemHrefs(xhr.responseText, calUrl, baseUrl);
+                if (count === 0 && itemHrefs.length > 0) {
+                    console.log("[CalDAVTasks] PROPFIND returned " + itemHrefs.length + " entries but no calendar-data; fetching '" + cal.name + "' items individually.");
+                    fetchTasksViaGet(itemHrefs, 0, cal, baseUrl, calendars, index, accumulated);
+                } else {
+                    fetchAllTasks(calendars, index + 1, accumulated);
+                }
             } else {
                 console.log("[CalDAVTasks] PROPFIND failed " + xhr.status + " for " + calUrl);
                 fetchAllTasks(calendars, index + 1, accumulated);
@@ -370,22 +445,78 @@ PlasmoidItem {
         xhr.send(body);
     }
 
+    // Collect the absolute hrefs of child resources (not the collection itself) from
+    // a Depth:1 PROPFIND multistatus response.
+    function extractItemHrefs(xml, calUrl, baseUrl) {
+        var originMatch = baseUrl.match(/^(https?:\/\/[^\/]+)/i);
+        var origin = originMatch ? originMatch[1] : "";
+        var normalizedCalUrl = calUrl.replace(/\/$/, "");
+
+        var hrefs = [];
+        var responses = xml.split(/<(?:[^:>\s]+:)?response[\s>]/i);
+        for (var i = 1; i < responses.length; i++) {
+            var hrefMatch = responses[i].match(/<(?:[^:>\s]+:)?href[^>]*>([^<]+)<\/(?:[^:>\s]+:)?href>/i);
+            if (!hrefMatch) continue;
+            var href = hrefMatch[1].trim();
+            var absHref = href.indexOf("http") === 0 ? href : origin + href;
+            if (absHref.replace(/\/$/, "") === normalizedCalUrl) continue; // skip the collection itself
+            hrefs.push(absHref);
+        }
+        return hrefs;
+    }
+
+    // Fallback for servers (e.g. Radicale) that don't return calendar-data from a
+    // plain PROPFIND: fetch each resource individually via GET.
+    function fetchTasksViaGet(hrefs, i, cal, baseUrl, calendars, index, accumulated) {
+        if (i >= hrefs.length) {
+            fetchAllTasks(calendars, index + 1, accumulated);
+            return;
+        }
+
+        var href = hrefs[i];
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", href, true);
+        xhr.setRequestHeader("Authorization", authHeader());
+        xhr.timeout = 20000;
+
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return;
+            if (xhr.status >= 200 && xhr.status < 300) {
+                var etag = xhr.getResponseHeader("ETag") || "";
+                addTaskFromIcal(xhr.responseText, href, cal, accumulated, etag);
+            } else {
+                console.log("[CalDAVTasks] GET failed " + xhr.status + " for " + href);
+            }
+            fetchTasksViaGet(hrefs, i + 1, cal, baseUrl, calendars, index, accumulated);
+        };
+        xhr.ontimeout = function() {
+            console.log("[CalDAVTasks] GET timed out: " + href);
+            fetchTasksViaGet(hrefs, i + 1, cal, baseUrl, calendars, index, accumulated);
+        };
+        xhr.onerror = function() {
+            console.log("[CalDAVTasks] GET onerror: " + href);
+            fetchTasksViaGet(hrefs, i + 1, cal, baseUrl, calendars, index, accumulated);
+        };
+
+        xhr.send();
+    }
+
     // Parse inline calendar-data from a DAV multistatus response.
     function parseTasksFromMultistatus(xml, cal, baseUrl, accumulated) {
         var count = 0;
         var originMatch = baseUrl.match(/^(https?:\/\/[^\/]+)/i);
         var origin = originMatch ? originMatch[1] : "";
 
-        var responses = xml.split(/<[^:>]+:response[\s>]/i);
+        var responses = xml.split(/<(?:[^:>\s]+:)?response[\s>]/i);
         for (var i = 1; i < responses.length; i++) {
             var block = responses[i];
 
-            var hrefMatch = block.match(/<[^:>]+:href[^>]*>([^<]+)<\/[^:>]+:href>/i);
+            var hrefMatch = block.match(/<(?:[^:>\s]+:)?href[^>]*>([^<]+)<\/(?:[^:>\s]+:)?href>/i);
             if (!hrefMatch) continue;
             var href = hrefMatch[1].trim();
             if (href.indexOf("http") !== 0) href = origin + href;
 
-            var dataMatch = block.match(/<[^:>]+:calendar-data[^>]*>([\s\S]*?)<\/[^:>]+:calendar-data>/i);
+            var dataMatch = block.match(/<(?:[^:>\s]+:)?calendar-data[^>]*>([\s\S]*?)<\/(?:[^:>\s]+:)?calendar-data>/i);
             if (!dataMatch) continue;
 
             var ical = dataMatch[1]
@@ -393,7 +524,10 @@ PlasmoidItem {
                 .replace(/\]\]>/g, "")
                 .trim();
 
-            if (addTaskFromIcal(ical, href, cal, accumulated)) {
+            var etagMatch = block.match(/<(?:[^:>\s]+:)?getetag[^>]*>([^<]*)<\/(?:[^:>\s]+:)?getetag>/i);
+            var etag = etagMatch ? etagMatch[1].trim() : "";
+
+            if (addTaskFromIcal(ical, href, cal, accumulated, etag)) {
                 count++;
             }
         }
@@ -401,7 +535,7 @@ PlasmoidItem {
         return count;
     }
 
-    function addTaskFromIcal(ical, href, cal, accumulated) {
+    function addTaskFromIcal(ical, href, cal, accumulated, etag) {
         if (!/BEGIN:VTODO/i.test(ical)) return false;
 
         var summary = icalField(ical, "SUMMARY") || i18n("(no title)");
@@ -435,7 +569,8 @@ PlasmoidItem {
                 calendar: cal.name,
                 href: href,
                 calUrl: cal.href,
-                ical: ical
+                ical: ical,
+                etag: etag || ""
             });
         }
 
@@ -560,20 +695,33 @@ PlasmoidItem {
 
         console.log("[CalDAVTasks] toggleTaskComplete: '" + task.summary + "' completed=" + task.completed + " -> " + !task.completed + " url=" + taskUrl);
 
-        var xhr = new XMLHttpRequest();
-        xhr.open("PUT", taskUrl, true);
-        xhr.setRequestHeader("Authorization", authHeader());
-        xhr.setRequestHeader("Content-Type", "text/calendar; charset=utf-8");
-        xhr.setRequestHeader("If-Match", "*");
+        function putIt(useEtag) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("PUT", taskUrl, true);
+            xhr.setRequestHeader("Authorization", authHeader());
+            xhr.setRequestHeader("Content-Type", "text/calendar; charset=utf-8");
+            // Use the real ETag rather than the "*" wildcard: Radicale rejects "*" on an
+            // update with 412 Precondition Failed, while a real ETag works everywhere.
+            if (useEtag && task.etag) xhr.setRequestHeader("If-Match", task.etag);
 
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState !== XMLHttpRequest.DONE) return;
-            console.log("[CalDAVTasks] PUT status: " + xhr.status + " for '" + task.summary + "'");
-            // Refresh regardless of result
-            discoverCalendars();
-        };
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState !== XMLHttpRequest.DONE) return;
+                console.log("[CalDAVTasks] PUT status: " + xhr.status + " for '" + task.summary + "'");
+                if (xhr.status === 412 && useEtag) {
+                    // Stale/mismatched ETag (server-side quirk or a race with another
+                    // refresh) — retry once unconditionally rather than blocking the edit.
+                    console.log("[CalDAVTasks] 412 with If-Match; retrying '" + task.summary + "' without it.");
+                    putIt(false);
+                    return;
+                }
+                // Refresh regardless of result
+                discoverCalendars();
+            };
 
-        xhr.send(unfolded);
+            xhr.send(unfolded);
+        }
+
+        putIt(true);
     }
 
     // Generate a RFC 4122 v4 UUID
@@ -734,34 +882,48 @@ PlasmoidItem {
         console.log("[CalDAVTasks] updateTask: '" + task.summary + "' -> '" + newSummary + "' url=" + taskUrl);
 
         savingTask = true;
-        var xhr = new XMLHttpRequest();
-        xhr.open("PUT", taskUrl, true);
-        xhr.setRequestHeader("Authorization", authHeader());
-        xhr.setRequestHeader("Content-Type", "text/calendar; charset=utf-8");
-        xhr.setRequestHeader("If-Match", "*");
-        xhr.timeout = 15000;
 
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState !== XMLHttpRequest.DONE) return;
-            savingTask = false;
-            root.editingTask = null;
-            console.log("[CalDAVTasks] updateTask PUT status: " + xhr.status);
-            if (xhr.status >= 200 && xhr.status < 300) {
-                discoverCalendars();
-            } else {
-                errorMessage = i18n("Failed to update task: %1 %2", xhr.status, xhr.statusText);
-            }
-        };
-        xhr.ontimeout = function() {
-            savingTask = false;
-            errorMessage = i18n("Timed out while updating task.");
-        };
-        xhr.onerror = function() {
-            savingTask = false;
-            errorMessage = i18n("Network error while updating task.");
-        };
+        function putIt(useEtag) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("PUT", taskUrl, true);
+            xhr.setRequestHeader("Authorization", authHeader());
+            xhr.setRequestHeader("Content-Type", "text/calendar; charset=utf-8");
+            // Use the real ETag rather than the "*" wildcard: Radicale rejects "*" on an
+            // update with 412 Precondition Failed, while a real ETag works everywhere.
+            if (useEtag && task.etag) xhr.setRequestHeader("If-Match", task.etag);
+            xhr.timeout = 15000;
 
-        xhr.send(unfolded);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState !== XMLHttpRequest.DONE) return;
+                console.log("[CalDAVTasks] updateTask PUT status: " + xhr.status);
+                if (xhr.status === 412 && useEtag) {
+                    // Stale/mismatched ETag (server-side quirk or a race with another
+                    // refresh) — retry once unconditionally rather than blocking the edit.
+                    console.log("[CalDAVTasks] 412 with If-Match; retrying update without it.");
+                    putIt(false);
+                    return;
+                }
+                savingTask = false;
+                root.editingTask = null;
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    discoverCalendars();
+                } else {
+                    errorMessage = i18n("Failed to update task: %1 %2", xhr.status, xhr.statusText);
+                }
+            };
+            xhr.ontimeout = function() {
+                savingTask = false;
+                errorMessage = i18n("Timed out while updating task.");
+            };
+            xhr.onerror = function() {
+                savingTask = false;
+                errorMessage = i18n("Network error while updating task.");
+            };
+
+            xhr.send(unfolded);
+        }
+
+        putIt(true);
     }
 
     // Format due date for display

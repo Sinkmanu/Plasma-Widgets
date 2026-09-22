@@ -17,6 +17,29 @@ QQC2.ScrollView {
     property bool discovering: false
     property string discoverError: ""
 
+    function fallbackCalendarCollectionUrl(baseUrl, user) {
+        var calMatch = baseUrl.match(/^(.*\/calendars\/[^\/]+)/i);
+        return calMatch
+            ? calMatch[1] + "/"
+            : baseUrl + "/calendars/" + encodeURIComponent(user) + "/";
+    }
+
+    function resolveDavUrl(baseUrl, href) {
+        if (href.indexOf("http") === 0) return href;
+        var originMatch = baseUrl.match(/^(https?:\/\/[^\/]+)/i);
+        var origin = originMatch ? originMatch[1] : "";
+        if (href.charAt(0) === "/") return origin + href;
+        return baseUrl.replace(/\/$/, "") + "/" + href;
+    }
+
+    function responseHref(xml, propertyName) {
+        // Namespace prefix is optional: Radicale emits unprefixed tags (xmlns="DAV:" on the root),
+        // while Nextcloud/Baikal use prefixes like "d:" or "cs:".
+        var propertyMatch = new RegExp("<(?:[^:>\\s]+:)?" + propertyName + "[^>]*>[\\s\\S]*?<(?:[^:>\\s]+:)?href[^>]*>([^<]+)</(?:[^:>\\s]+:)?href>", "i");
+        var match = xml.match(propertyMatch);
+        return match ? match[1].trim() : "";
+    }
+
     function doDiscover() {
         var baseUrl = (Plasmoid.configuration.caldavUrl || "").replace(/\/$/, "");
         var user = Plasmoid.configuration.username || "";
@@ -31,53 +54,85 @@ QQC2.ScrollView {
         discoverError = "";
         discoveredCalendars = [];
 
-        var calMatch = baseUrl.match(/^(.*\/calendars\/[^\/]+)/i);
-        var calendarsUrl = calMatch
-            ? calMatch[1] + "/"
-            : baseUrl + "/calendars/" + encodeURIComponent(user) + "/";
+        var fallbackUrl = fallbackCalendarCollectionUrl(baseUrl, user);
 
-        var xhr = new XMLHttpRequest();
-        xhr.open("PROPFIND", calendarsUrl, true);
-        xhr.setRequestHeader("Authorization", "Basic " + Qt.btoa(user + ":" + pass));
-        xhr.setRequestHeader("Content-Type", "application/xml; charset=utf-8");
-        xhr.setRequestHeader("Depth", "1");
+        function listCalendars(calendarsUrl) {
+            if (calendarsUrl.slice(-1) !== "/") calendarsUrl += "/";
 
-        var body =
-            '<?xml version="1.0" encoding="UTF-8"?>' +
-            '<d:propfind xmlns:d="DAV:" xmlns:cs="urn:ietf:params:xml:ns:caldav">' +
-            '<d:prop><d:resourcetype/><d:displayname/>' +
-            '<cs:supported-calendar-component-set/></d:prop>' +
-            '</d:propfind>';
+            var xhr = new XMLHttpRequest();
+            xhr.open("PROPFIND", calendarsUrl, true);
+            xhr.setRequestHeader("Authorization", "Basic " + Qt.btoa(user + ":" + pass));
+            xhr.setRequestHeader("Content-Type", "application/xml; charset=utf-8");
+            xhr.setRequestHeader("Depth", "1");
 
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState !== XMLHttpRequest.DONE) return;
-            discovering = false;
+            var body =
+                '<?xml version="1.0" encoding="UTF-8"?>' +
+                '<d:propfind xmlns:d="DAV:" xmlns:cs="urn:ietf:params:xml:ns:caldav">' +
+                '<d:prop><d:resourcetype/><d:displayname/>' +
+                '<cs:supported-calendar-component-set/></d:prop>' +
+                '</d:propfind>';
 
-            if (xhr.status < 200 || xhr.status >= 300) {
-                discoverError = i18n("Error %1: %2\nURL: %3", xhr.status, xhr.statusText, calendarsUrl);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState !== XMLHttpRequest.DONE) return;
+                discovering = false;
+
+                if (xhr.status < 200 || xhr.status >= 300) {
+                    discoverError = i18n("Error %1: %2\nURL: %3", xhr.status, xhr.statusText, calendarsUrl);
+                    return;
+                }
+
+                var xml = xhr.responseText;
+                var found = [];
+                var responses = xml.split(/<(?:[^:>\s]+:)?response[\s>]/i);
+                for (var i = 1; i < responses.length; i++) {
+                    var block = responses[i];
+                    if (!/<(?:[^:>\s]+:)?calendar[\s\/>]/i.test(block)) continue;
+                    if (!/comp[^>]+name\s*=\s*["']?VTODO["']?/i.test(block)) continue;
+                    var nm = block.match(/<(?:[^:>\s]+:)?displayname[^>]*>([^<]*)<\/(?:[^:>\s]+:)?displayname>/i);
+                    var name = (nm && nm[1].trim()) ? nm[1].trim() : "";
+                    if (name) found.push(name);
+                }
+
+                if (found.length === 0) {
+                    discoverError = i18n("No calendars with VTODO support found.");
+                } else {
+                    discoveredCalendars = found;
+                }
+            };
+
+            xhr.send(body);
+        }
+
+        var endpointXhr = new XMLHttpRequest();
+        endpointXhr.open("PROPFIND", baseUrl + "/", true);
+        endpointXhr.setRequestHeader("Authorization", "Basic " + Qt.btoa(user + ":" + pass));
+        endpointXhr.setRequestHeader("Content-Type", "application/xml; charset=utf-8");
+        endpointXhr.setRequestHeader("Depth", "0");
+        endpointXhr.onreadystatechange = function() {
+            if (endpointXhr.readyState !== XMLHttpRequest.DONE) return;
+            var principalHref = endpointXhr.status >= 200 && endpointXhr.status < 300
+                ? responseHref(endpointXhr.responseText, "current-user-principal") : "";
+            if (!principalHref) {
+                listCalendars(fallbackUrl);
                 return;
             }
 
-            var xml = xhr.responseText;
-            var found = [];
-            var responses = xml.split(/<[^:>]+:response[\s>]/i);
-            for (var i = 1; i < responses.length; i++) {
-                var block = responses[i];
-                if (!/:calendar[\s\/]/i.test(block)) continue;
-                if (!/:comp[^>]+name\s*=\s*["']?VTODO["']?/i.test(block)) continue;
-                var nm = block.match(/<[^:>]+:displayname[^>]*>([^<]*)<\/[^:>]+:displayname>/i);
-                var name = (nm && nm[1].trim()) ? nm[1].trim() : "";
-                if (name) found.push(name);
-            }
-
-            if (found.length === 0) {
-                discoverError = i18n("No calendars with VTODO support found.");
-            } else {
-                discoveredCalendars = found;
-            }
+            var principalXhr = new XMLHttpRequest();
+            principalXhr.open("PROPFIND", resolveDavUrl(baseUrl, principalHref), true);
+            principalXhr.setRequestHeader("Authorization", "Basic " + Qt.btoa(user + ":" + pass));
+            principalXhr.setRequestHeader("Content-Type", "application/xml; charset=utf-8");
+            principalXhr.setRequestHeader("Depth", "0");
+            principalXhr.onreadystatechange = function() {
+                if (principalXhr.readyState !== XMLHttpRequest.DONE) return;
+                var collectionHref = principalXhr.status >= 200 && principalXhr.status < 300
+                    ? responseHref(principalXhr.responseText, "calendar-home-set") : "";
+                listCalendars(collectionHref ? resolveDavUrl(baseUrl, collectionHref) : fallbackUrl);
+            };
+            principalXhr.onerror = function() { listCalendars(fallbackUrl); };
+            principalXhr.send('<?xml version="1.0" encoding="UTF-8"?><d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-home-set/></d:prop></d:propfind>');
         };
-
-        xhr.send(body);
+        endpointXhr.onerror = function() { listCalendars(fallbackUrl); };
+        endpointXhr.send('<?xml version="1.0" encoding="UTF-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>');
     }
 
     // Returns true if the given calendar name is enabled in the current filter

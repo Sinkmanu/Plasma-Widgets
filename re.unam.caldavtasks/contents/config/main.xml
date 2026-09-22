@@ -6,7 +6,7 @@
     <kcfgfile name=""/>
     <group name="General">
         <entry name="caldavUrl" type="String">
-            <label>CalDAV base URL (e.g. http://nextcloud.local/remote.php/dav)</label>
+            <label>CalDAV endpoint URL (e.g. http://nextcloud.local/remote.php/dav)</label>
             <default></default>
         </entry>
         <entry name="username" type="String">

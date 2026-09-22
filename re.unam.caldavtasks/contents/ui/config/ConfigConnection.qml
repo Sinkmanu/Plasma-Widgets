@@ -14,13 +14,13 @@ Kirigami.FormLayout {
     QQC2.TextField {
         id: caldavUrlField
         Kirigami.FormData.label: i18n("CalDAV URL:")
-        placeholderText: "https://nextcloud.example.org/remote.php/dav"
+        placeholderText: "https://caldav.example.org/dav"
         Layout.fillWidth: true
     }
 
     QQC2.Label {
         Kirigami.FormData.label: " "
-        text: i18n("Base DAV URL only — do not include /calendars/... Use: https://yournextcloud/remote.php/dav")
+        text: i18n("Enter the server's CalDAV endpoint. Calendar collections are discovered automatically.")
         wrapMode: Text.WordWrap
         Layout.fillWidth: true
         opacity: 0.6
@@ -30,7 +30,7 @@ Kirigami.FormLayout {
     QQC2.TextField {
         id: usernameField
         Kirigami.FormData.label: i18n("Username:")
-        placeholderText: i18n("Your Nextcloud username")
+        placeholderText: i18n("Your CalDAV username")
         Layout.fillWidth: true
     }
 
@@ -52,7 +52,7 @@ Kirigami.FormLayout {
 
     QQC2.Label {
         Kirigami.FormData.label: " "
-        text: i18n("Tip: Use an App Password from Nextcloud → Settings → Security for better security.")
+        text: i18n("Tip: Use an app password or token when your server supports one.")
         wrapMode: Text.WordWrap
         Layout.fillWidth: true
         opacity: 0.6
